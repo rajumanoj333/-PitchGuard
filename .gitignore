@@ -1,0 +1,44 @@
+# Secrets
+*.env
+.env.*
+!.env.example
+service-account*.json
+gcp-key*.json
+*-credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+dist/
+build/
+
+# Firebase
+.firebase/
+.firebaserc.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
