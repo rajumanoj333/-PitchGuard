@@ -33,6 +33,28 @@ build/
 .DS_Store
 Thumbs.db
 
+# AI / tooling caches
+.claude/
+.playwright-mcp/
+.cursor/
+.aider*
+.continue/
+
+# Env files (extra belt + suspenders)
+.env
+.env.local
+.env.local.example
+backend/.env
+console/.env
+console/.env.local
+.env.production
+.env.development
+
+# OS / misc
+*.bak
+*.tmp
+*.orig
+
 # Logs
 *.log
 npm-debug.log*

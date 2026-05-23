@@ -5,14 +5,20 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#0a0e1a",
-        panel: "#111726",
+        ink: "#0f1115",
+        panel: "#181b22",
+        line: "#262932",
         accent: "#22d3ee",
         warn: "#f59e0b",
         crit: "#ef4444",
+        safe: "#22c55e",
       },
       fontFamily: {
+        display: ["var(--font-outfit)", "system-ui", "-apple-system", "sans-serif"],
         mono: ["ui-monospace", "SFMono-Regular", "monospace"],
+      },
+      fontVariantNumeric: {
+        tabular: "tabular-nums",
       },
     },
   },

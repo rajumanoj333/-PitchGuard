@@ -2,8 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: dark;
+}
+
 html, body {
-  background: #0a0e1a;
-  color: #e5e7eb;
-  min-height: 100vh;
+  background: #0f1115;
+  color: #f5f5f7;
+  min-height: 100dvh;
+  -webkit-tap-highlight-color: transparent;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-feature-settings: "ss01", "cv11";
+  letter-spacing: -0.01em;
+}
+
+button { -webkit-tap-highlight-color: transparent; }
+
+/* Tabular numerals for any data-like figures */
+.num { font-variant-numeric: tabular-nums; }
+
+/* Soft pulsing dot used for "live" indicators */
+@keyframes softpulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(0.85); }
+}
+.live-dot { animation: softpulse 1.6s ease-in-out infinite; }
+
+/* Big urgent screen flash */
+@keyframes urgentflash {
+  0%, 100% { background-color: #2a0a0a; }
+  50%      { background-color: #6a0f0f; }
+}
+.bg-urgent { animation: urgentflash 0.9s ease-in-out infinite; }
+
+/* Fan name label readability on satellite map */
+.fan-label {
+  background: rgba(15, 17, 21, 0.78);
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(167, 139, 250, 0.45);
+  transform: translateY(-22px);
+  white-space: nowrap;
 }
