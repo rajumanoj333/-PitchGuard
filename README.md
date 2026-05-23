@@ -296,6 +296,6 @@ That's the whole brain. Read [main.py](backend/main.py) — it's under 400 lines
 
 ## Team
 
-- **Team:** Raju Manoj
+- **Team:** Manoj
 - **GCP Project:** `pitchguard`
 - **Built with:** Google Cloud · Vertex AI Gemini · Firebase
