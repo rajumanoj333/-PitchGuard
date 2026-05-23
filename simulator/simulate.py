@@ -21,11 +21,13 @@ import time
 
 import httpx
 
-# 3 zones, 3 gates. Matches backend ZONES.
+# Narendra Modi Stadium, Ahmedabad — 4 main gate concourses (one per zone).
+# capacity_m2 sized for surge-math, not real footprint.
 GATES = [
-    {"gate_id": "N1", "zone_id": "NORTH", "capacity_m2": 60.0},
-    {"gate_id": "E1", "zone_id": "EAST",  "capacity_m2": 60.0},
-    {"gate_id": "W1", "zone_id": "WEST",  "capacity_m2": 60.0},
+    {"gate_id": "Gate 1",  "zone_id": "NORTH", "capacity_m2": 60.0},
+    {"gate_id": "Gate 5",  "zone_id": "EAST",  "capacity_m2": 60.0},
+    {"gate_id": "Gate 9",  "zone_id": "SOUTH", "capacity_m2": 80.0},
+    {"gate_id": "Gate 11", "zone_id": "WEST",  "capacity_m2": 60.0},
 ]
 
 

@@ -62,12 +62,35 @@ except Exception as e:
     log.warning("Firestore unavailable: %s", e)
 
 
-# Stadium zones — 3 zones, 3 gates. Coords chosen near a real stadium so Maps renders.
-# Centered on Chinnaswamy Stadium, Bengaluru. Override via env if needed.
+# Narendra Modi Stadium, Ahmedabad — real coordinates of 4 primary entry/exit gates.
+# Stadium center: ~23.0922 N, 72.5972 E (Motera, Ahmedabad). Worlds largest cricket stadium.
+STADIUM_CENTER = {"lat": 23.09225, "lng": 72.59720, "name": "Narendra Modi Stadium, Ahmedabad"}
+
 ZONES: dict[str, dict] = {
-    "NORTH": {"gate_id": "N1", "lat": 12.97955, "lng": 77.59960, "label": "Zone North · Gate N1"},
-    "EAST":  {"gate_id": "E1", "lat": 12.97890, "lng": 77.60040, "label": "Zone East · Gate E1"},
-    "WEST":  {"gate_id": "W1", "lat": 12.97890, "lng": 77.59880, "label": "Zone West · Gate W1"},
+    "NORTH": {
+        "gate_id": "Gate 1",
+        "lat": 23.09365, "lng": 72.59710,
+        "label": "Zone North · Gate 1 (Motera Stadium Rd)",
+        "capacity_m2": 800.0,
+    },
+    "EAST": {
+        "gate_id": "Gate 5",
+        "lat": 23.09225, "lng": 72.59870,
+        "label": "Zone East · Gate 5 (Players Pavilion)",
+        "capacity_m2": 800.0,
+    },
+    "SOUTH": {
+        "gate_id": "Gate 9",
+        "lat": 23.09075, "lng": 72.59720,
+        "label": "Zone South · Gate 9 (Main Entrance)",
+        "capacity_m2": 1200.0,
+    },
+    "WEST": {
+        "gate_id": "Gate 11",
+        "lat": 23.09225, "lng": 72.59570,
+        "label": "Zone West · Gate 11 (Broadcast Side)",
+        "capacity_m2": 800.0,
+    },
 }
 
 
@@ -315,3 +338,32 @@ def recent_decisions(limit: int = 20) -> list[dict]:
         .limit(limit)
     )
     return [{**d.to_dict(), "id": d.id} for d in q.stream()]
+
+
+class ManualAlert(BaseModel):
+    zone_id: str  # target zone (fans currently in this zone receive alert)
+    exit_gate: str  # gate id like "Gate 9"
+    exit_lat: float
+    exit_lng: float
+    message: str = Field(max_length=240)
+    severity: Literal["info", "watch", "warn", "critical"] = "warn"
+    operator: str = "control-room"
+
+
+@app.post("/alerts")
+def manual_alert(a: ManualAlert) -> dict:
+    """Operator-issued push: tell every fan in `zone_id` to evacuate via `exit_gate`."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="firestore unavailable")
+    doc = {
+        "ts": firestore.SERVER_TIMESTAMP,
+        "type": "manual",
+        **a.model_dump(),
+    }
+    ref = db.collection("alerts").add(doc)
+    return {"id": ref[1].id, "ok": True}
+
+
+@app.get("/stadium")
+def stadium() -> dict:
+    return {"center": STADIUM_CENTER, "zones": ZONES}
