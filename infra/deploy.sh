@@ -29,7 +29,7 @@ gcloud run deploy "$SERVICE" \
   --allow-unauthenticated \
   --memory 1Gi \
   --concurrency 80 \
-  --max-instances 50 \
+  --max-instances 10 \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$VERTEX_LOCATION,VERTEX_MODEL=gemini-2.5-flash,DENSITY_THRESHOLD_PER_M2=4.0,ALERT_TOPIC=pitchguard-alerts"
 
 BRAIN_URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')
