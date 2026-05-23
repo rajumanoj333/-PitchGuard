@@ -1,20 +1,17 @@
 "use client";
 
 /**
- * Fan beacon page — iPhone-optimized.
+ * Fan page — kid-simple UI.
  *
- * Flow:
- *   1. Pick name + entry zone.
- *   2. Arm beacon — grants Geolocation + unlocks WebAudio.
- *   3. App writes our position to Firestore `fans/{fanId}` every 5s so operator sees us.
- *   4. App listens to:
- *        - `live/current` (brain's latest decision)
- *        - `alerts` collection (operator-pushed alerts targeted to my zone)
- *      If alarm matches our zone → siren + embedded Google walking-map to safe gate.
- *   5. Demo controls: "Jump to Zone X" buttons fake our GPS to a zone center.
+ * 3 states only:
+ *   1. WELCOME  — pick where you are sitting (4 big colored buttons)
+ *   2. SAFE     — green screen "You are safe, enjoy the match"
+ *   3. MOVE     — red screen "Walk to <Green Gate>" + walking map + siren
+ *
+ * Demo: 4 small buttons at bottom let you pretend to move between zones.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   doc, onSnapshot, setDoc, deleteDoc,
   collection, query, where, orderBy, limit, serverTimestamp,
@@ -26,28 +23,24 @@ type ZoneId = "NORTH" | "EAST" | "SOUTH" | "WEST";
 
 const STADIUM_CENTER = { lat: 23.09225, lng: 72.59720 };
 
-// Real Narendra Modi Stadium gate coords. Used both for the zone selector and demo jumps.
-const ZONES: Record<ZoneId, { gate: string; lat: number; lng: number; label: string }> = {
-  NORTH: { gate: "Gate 1",  lat: 23.09365, lng: 72.59710, label: "Zone North · Gate 1 (Motera Rd)" },
-  EAST:  { gate: "Gate 5",  lat: 23.09225, lng: 72.59870, label: "Zone East · Gate 5 (Players Pavilion)" },
-  SOUTH: { gate: "Gate 9",  lat: 23.09075, lng: 72.59720, label: "Zone South · Gate 9 (Main Entrance)" },
-  WEST:  { gate: "Gate 11", lat: 23.09225, lng: 72.59570, label: "Zone West · Gate 11 (Broadcast Side)" },
+// Plain-English labels — no "Zone" word.
+const PLACES: Record<ZoneId, { gate: string; lat: number; lng: number; nice: string; emoji: string; color: string }> = {
+  NORTH: { gate: "Gate 1",  lat: 23.09365, lng: 72.59710, nice: "North Side", emoji: "⬆️", color: "#3b82f6" },
+  EAST:  { gate: "Gate 5",  lat: 23.09225, lng: 72.59870, nice: "East Side",  emoji: "➡️", color: "#10b981" },
+  SOUTH: { gate: "Gate 9",  lat: 23.09075, lng: 72.59720, nice: "South Side", emoji: "⬇️", color: "#f59e0b" },
+  WEST:  { gate: "Gate 11", lat: 23.09225, lng: 72.59570, nice: "West Side",  emoji: "⬅️", color: "#a855f7" },
 };
 
 type Geo = { lat: number; lng: number; accuracy: number } | null;
-
 type Decision = {
-  severity?: "info" | "watch" | "warn" | "critical";
-  summary?: string;
-  actions?: string[];
   affected_zones?: string[];
   reroute_to_zone?: string | null;
   reroute_to_gate?: string | null;
   reroute_to_lat?: number | null;
   reroute_to_lng?: number | null;
   alarm?: boolean;
+  summary?: string;
 };
-
 type Alert = {
   id: string;
   zone_id: string;
@@ -55,11 +48,9 @@ type Alert = {
   exit_lat: number;
   exit_lng: number;
   message: string;
-  severity?: string;
-  ts?: { seconds: number } | null;
 };
 
-function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+function metersBetween(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
   const R = 6371000;
   const toRad = (x: number) => (x * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
@@ -70,7 +61,7 @@ function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng:
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-function getOrMintFanId(): string {
+function fanId(): string {
   const k = "pitchguard:fanId";
   let id = typeof window !== "undefined" ? localStorage.getItem(k) : null;
   if (!id) {
@@ -81,104 +72,107 @@ function getOrMintFanId(): string {
 }
 
 export default function FanPage() {
-  const [armed, setArmed] = useState(false);
-  const [name, setName] = useState("");
-  const [zoneId, setZoneId] = useState<ZoneId>("NORTH");
+  const [stage, setStage] = useState<"welcome" | "active">("welcome");
+  const [mySeat, setMySeat] = useState<ZoneId>("NORTH");
   const [realGeo, setRealGeo] = useState<Geo>(null);
-  const [demoOverride, setDemoOverride] = useState<{ zone: ZoneId; lat: number; lng: number } | null>(null);
+  const [demoSeat, setDemoSeat] = useState<ZoneId | null>(null);
   const [geoErr, setGeoErr] = useState<string | null>(null);
   const [decision, setDecision] = useState<Decision | null>(null);
-  const [latestAlert, setLatestAlert] = useState<Alert | null>(null);
+  const [alert, setAlert] = useState<Alert | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sirenStopRef = useRef<(() => void) | null>(null);
   const watchIdRef = useRef<number | null>(null);
-  const fanIdRef = useRef<string>("");
+  const idRef = useRef<string>("");
 
-  // Effective position: demo override beats real GPS.
-  const pos = demoOverride
-    ? { lat: demoOverride.lat, lng: demoOverride.lng, accuracy: 5 }
+  useEffect(() => { idRef.current = fanId(); }, []);
+
+  const here: ZoneId = demoSeat ?? mySeat;
+  const pos = demoSeat
+    ? { lat: PLACES[demoSeat].lat, lng: PLACES[demoSeat].lng, accuracy: 5 }
     : realGeo;
 
-  // Effective zone: demo override beats user-selected zone.
-  const myZone: ZoneId = (demoOverride?.zone ?? zoneId) as ZoneId;
-
-  useEffect(() => { fanIdRef.current = getOrMintFanId(); }, []);
-
-  // --- Firestore subscriptions ---
+  // --- Subscriptions ---
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, "live", "current"), (snap) => {
-      const d = snap.data() as Decision | undefined;
+    const u = onSnapshot(doc(db, "live", "current"), (s) => {
+      const d = s.data() as Decision | undefined;
       if (d) setDecision(d);
     });
-    return () => unsub();
+    return () => u();
   }, []);
 
   useEffect(() => {
-    if (!armed) return;
+    if (stage !== "active") return;
     const q = query(
       collection(db, "alerts"),
-      where("zone_id", "==", myZone),
+      where("zone_id", "==", here),
       orderBy("ts", "desc"),
       limit(1),
     );
-    const unsub = onSnapshot(q, (snap) => {
+    const u = onSnapshot(q, (snap) => {
       const d = snap.docs[0];
-      if (!d) return setLatestAlert(null);
-      setLatestAlert({ id: d.id, ...(d.data() as Omit<Alert, "id">) });
+      setAlert(d ? { id: d.id, ...(d.data() as Omit<Alert, "id">) } : null);
     });
-    return () => unsub();
-  }, [armed, myZone]);
+    return () => u();
+  }, [stage, here]);
 
-  // --- Write fan heartbeat to Firestore ---
+  // Heartbeat: write our position so operator sees us
   useEffect(() => {
-    if (!armed || !pos) return;
-    const fanId = fanIdRef.current;
+    if (stage !== "active" || !pos) return;
+    const id = idRef.current;
     const tick = async () => {
       try {
-        await setDoc(doc(db, "fans", fanId), {
-          name: name || "Anon Fan",
-          zone: myZone,
+        await setDoc(doc(db, "fans", id), {
+          name: "Fan",
+          zone: here,
           lat: pos.lat,
           lng: pos.lng,
           accuracy: Math.min(999, Math.round(pos.accuracy)),
           ts: serverTimestamp(),
           ua: navigator.userAgent.slice(0, 80),
         });
-      } catch (e) {
-        console.warn("fan heartbeat failed", e);
-      }
+      } catch {}
     };
     tick();
-    const id = setInterval(tick, 5000);
-    return () => clearInterval(id);
-  }, [armed, pos?.lat, pos?.lng, name, myZone]);
-
-  // Clean up own doc on unload
-  useEffect(() => {
-    if (!armed) return;
-    const fanId = fanIdRef.current;
-    const handler = () => deleteDoc(doc(db, "fans", fanId)).catch(() => {});
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [armed]);
-
-  // --- Alarm logic ---
-  const brainAlarmForMe =
-    !!decision?.alarm &&
-    (decision.affected_zones || []).includes(myZone);
-  const isAlerting = armed && (brainAlarmForMe || !!latestAlert);
+    const t = setInterval(tick, 5000);
+    return () => clearInterval(t);
+  }, [stage, pos?.lat, pos?.lng, here]);
 
   useEffect(() => {
-    if (isAlerting) {
+    if (stage !== "active") return;
+    const id = idRef.current;
+    const cleanup = () => deleteDoc(doc(db, "fans", id)).catch(() => {});
+    window.addEventListener("beforeunload", cleanup);
+    return () => window.removeEventListener("beforeunload", cleanup);
+  }, [stage]);
+
+  // Move-now state
+  const brainMove =
+    !!decision?.alarm && (decision.affected_zones || []).includes(here);
+  const moveNow = stage === "active" && (brainMove || !!alert);
+
+  const target = alert
+    ? { gate: alert.exit_gate, lat: alert.exit_lat, lng: alert.exit_lng, why: alert.message }
+    : decision?.alarm && decision.reroute_to_lat && decision.reroute_to_lng
+    ? {
+        gate: decision.reroute_to_gate || "Safe Gate",
+        lat: decision.reroute_to_lat,
+        lng: decision.reroute_to_lng,
+        why: decision.summary || "Too many people near you. Walk to the green gate.",
+      }
+    : null;
+
+  // Siren when moving
+  useEffect(() => {
+    if (moveNow) {
       startSiren();
-      if (navigator.vibrate) navigator.vibrate([400, 200, 400, 200, 800, 200, 400]);
+      if (navigator.vibrate) navigator.vibrate([400, 200, 400, 200, 600]);
     } else {
       stopSiren();
     }
     return () => stopSiren();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAlerting]);
+  }, [moveNow]);
 
   function startSiren() {
     const ctx = audioCtxRef.current;
@@ -188,24 +182,23 @@ export default function FanPage() {
     osc.type = "sawtooth";
     osc.connect(gain);
     gain.connect(ctx.destination);
-    gain.gain.value = 0.35;
+    gain.gain.value = 0.3;
     const now = ctx.currentTime;
-    for (let i = 0; i < 75; i++) {
-      const t = now + i * 0.4;
-      osc.frequency.setValueAtTime(i % 2 === 0 ? 700 : 1100, t);
+    for (let i = 0; i < 60; i++) {
+      osc.frequency.setValueAtTime(i % 2 === 0 ? 700 : 1100, now + i * 0.4);
     }
     osc.start(now);
-    osc.stop(now + 30);
+    osc.stop(now + 24);
     sirenStopRef.current = () => {
       try { osc.stop(); } catch {}
-      try { gain.disconnect(); } catch {}
       sirenStopRef.current = null;
     };
   }
   function stopSiren() { sirenStopRef.current?.(); }
 
-  // --- Arm: unlock audio + start GPS ---
-  async function arm() {
+  // Start: unlock audio + GPS
+  async function start(seat: ZoneId) {
+    setMySeat(seat);
     try {
       const Ctor = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
       const ctx = new Ctor();
@@ -214,28 +207,24 @@ export default function FanPage() {
       const src = ctx.createBufferSource();
       src.buffer = buf; src.connect(ctx.destination); src.start(0);
       audioCtxRef.current = ctx;
-    } catch (e) { console.warn("audio init failed", e); }
+    } catch {}
 
-    if (!("geolocation" in navigator)) {
-      setGeoErr("Geolocation unsupported on this browser");
-    } else {
+    if ("geolocation" in navigator) {
       try {
         const id = navigator.geolocation.watchPosition(
           (p) => {
-            setRealGeo({
-              lat: p.coords.latitude,
-              lng: p.coords.longitude,
-              accuracy: p.coords.accuracy,
-            });
+            setRealGeo({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy });
             setGeoErr(null);
           },
           (err) => setGeoErr(err.message),
           { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 },
         );
         watchIdRef.current = id;
-      } catch (e: any) { setGeoErr(e?.message || "geolocation error"); }
+      } catch (e: any) { setGeoErr(e?.message || "GPS error"); }
+    } else {
+      setGeoErr("Phone does not support location");
     }
-    setArmed(true);
+    setStage("active");
   }
 
   useEffect(() => () => {
@@ -243,224 +232,180 @@ export default function FanPage() {
     stopSiren();
   }, []);
 
-  // --- Active exit route ---
-  const exit = latestAlert
-    ? {
-        gate: latestAlert.exit_gate,
-        lat: latestAlert.exit_lat,
-        lng: latestAlert.exit_lng,
-        message: latestAlert.message,
-        source: "operator" as const,
-      }
-    : decision?.alarm && decision.reroute_to_lat && decision.reroute_to_lng
-    ? {
-        gate: decision.reroute_to_gate || "",
-        lat: decision.reroute_to_lat,
-        lng: decision.reroute_to_lng,
-        message: decision.summary || "",
-        source: "brain" as const,
-      }
-    : null;
+  const distance = pos && target ? metersBetween(pos, target) : null;
 
-  const distance = pos && exit ? haversineMeters(pos, exit) : null;
+  // ─────────────── WELCOME SCREEN ───────────────
+  if (stage === "welcome") {
+    return (
+      <main className="min-h-screen bg-ink p-5 flex flex-col gap-5">
+        <div className="text-center pt-4">
+          <p className="text-3xl mb-2">🏟️</p>
+          <p className="text-2xl font-bold">Stadium Safety</p>
+          <p className="text-sm text-gray-400 mt-1">Tap your seating side to begin</p>
+        </div>
 
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          {(Object.keys(PLACES) as ZoneId[]).map((z) => (
+            <button
+              key={z}
+              onClick={() => start(z)}
+              className="rounded-2xl p-5 flex flex-col items-center gap-2 active:scale-95 shadow-lg"
+              style={{ background: PLACES[z].color }}
+            >
+              <span className="text-4xl">{PLACES[z].emoji}</span>
+              <span className="text-white font-bold text-lg">{PLACES[z].nice}</span>
+              <span className="text-white/80 text-xs">{PLACES[z].gate}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="bg-panel rounded-xl p-4 mt-3 text-sm text-gray-300 space-y-1">
+          <p className="font-bold text-white">How it works</p>
+          <p>1. Pick where you are sitting.</p>
+          <p>2. Allow Location and Sound when asked.</p>
+          <p>3. We will buzz your phone if you need to move.</p>
+          <p>4. Follow the green line on the map.</p>
+        </div>
+
+        <footer className="mt-auto text-center text-[10px] text-gray-600">
+          Narendra Modi Stadium · Powered by Google Cloud
+        </footer>
+      </main>
+    );
+  }
+
+  // ─────────────── ACTIVE SCREEN ───────────────
   return (
     <main
-      className={`min-h-screen p-4 flex flex-col gap-4 transition-colors duration-150 ${
-        isAlerting ? "bg-crit animate-pulse" : "bg-ink"
+      className={`min-h-screen p-4 flex flex-col gap-3 transition-colors ${
+        moveNow ? "bg-crit animate-pulse" : "bg-ink"
       }`}
     >
       <header className="flex items-center justify-between">
-        <div className="text-base font-bold tracking-wide">
-          PITCHGUARD <span className="text-accent">·</span> Fan
-        </div>
-        <span className={`text-[10px] px-2 py-1 rounded ${armed ? "bg-accent text-ink" : "bg-gray-700 text-gray-300"}`}>
-          {armed ? "ARMED" : "OFF"}
-        </span>
+        <p className="text-base font-bold">🏟️ Stadium Safety</p>
+        <span className="text-[10px] px-2 py-1 rounded bg-accent text-ink font-bold">ON</span>
       </header>
 
-      {!armed ? (
-        <section className="flex-1 flex flex-col items-center justify-center gap-5">
-          <div className="text-center max-w-sm">
-            <p className="text-2xl font-bold mb-1">Welcome to the stadium</p>
-            <p className="text-gray-400 text-sm">
-              Arm to receive safety reroutes during the match. Uses live GPS to guide you to
-              the safest exit when a surge is detected.
-            </p>
-          </div>
-
-          <label className="text-sm text-gray-400 flex flex-col items-center gap-2 w-full max-w-xs">
-            Your name (optional)
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Raju"
-              className="bg-panel text-white text-base px-3 py-2 rounded border border-gray-700 w-full"
-            />
-          </label>
-
-          <label className="text-sm text-gray-400 flex flex-col items-center gap-2 w-full max-w-xs">
-            Your section
-            <select
-              value={zoneId}
-              onChange={(e) => setZoneId(e.target.value as ZoneId)}
-              className="bg-panel text-white text-base px-3 py-2 rounded border border-gray-700 w-full"
-            >
-              {(Object.keys(ZONES) as ZoneId[]).map((z) => (
-                <option key={z} value={z}>{ZONES[z].label}</option>
-              ))}
-            </select>
-          </label>
-
-          <button
-            onClick={arm}
-            className="bg-accent text-ink font-bold text-lg px-8 py-4 rounded-xl shadow-lg active:scale-95"
-          >
-            🛡  Arm Beacon
-          </button>
-          <p className="text-[11px] text-gray-500 max-w-xs text-center">
-            Allow Location + Sound when prompted. Required for safety alerts.
-          </p>
-        </section>
-      ) : (
-        <section className="flex flex-col gap-3 flex-1">
-          <div className="bg-panel rounded-xl p-3 flex items-center justify-between">
-            <div>
-              <p className="text-[10px] text-gray-400 uppercase">Your zone</p>
-              <p className="text-lg font-bold">
-                {myZone}
-                {demoOverride && <span className="ml-2 text-xs text-warn">(demo)</span>}
-              </p>
-              <p className="text-[10px] text-gray-500">{ZONES[myZone].label}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] text-gray-400 uppercase">Position</p>
-              {pos ? (
-                <p className="text-[10px] text-gray-300">
-                  {pos.lat.toFixed(5)}, {pos.lng.toFixed(5)}
-                  <br />±{pos.accuracy.toFixed(0)}m
-                </p>
-              ) : (
-                <p className="text-[11px] text-warn">{geoErr || "Acquiring GPS…"}</p>
-              )}
-            </div>
-          </div>
-
-          {/* Always-visible mini map showing where you are + your assigned exit */}
-          <MiniMap pos={pos} myZone={myZone} alerting={isAlerting} exit={exit} />
-
-          {isAlerting && exit ? (
-            <div className="bg-black/80 border-4 border-white rounded-xl p-4 space-y-3">
-              <div className="flex items-center gap-3">
-                <span className="text-4xl">🚨</span>
-                <div>
-                  <p className="uppercase text-[11px] tracking-widest">Evacuate to</p>
-                  <p className="text-2xl font-black">{exit.gate}</p>
-                </div>
-              </div>
-              {distance != null && (
-                <div className="bg-white/10 rounded-lg py-3 text-center">
-                  <p className="text-[10px] uppercase text-white/70">Distance to exit</p>
-                  <p className="text-3xl font-bold">{Math.round(distance)} m</p>
-                </div>
-              )}
-              <p className="text-sm leading-snug">{exit.message}</p>
-              {pos && (
-                <a
-                  href={`https://www.google.com/maps/dir/?api=1&origin=${pos.lat},${pos.lng}&destination=${exit.lat},${exit.lng}&travelmode=walking`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="block text-center bg-white text-crit font-bold py-3 rounded-lg text-base active:scale-95"
-                >
-                  Open turn-by-turn in Maps
-                </a>
-              )}
-              <button
-                onClick={stopSiren}
-                className="block w-full text-center text-[11px] text-white/70 underline"
-              >
-                Silence siren (route stays active)
-              </button>
-              <p className="text-[10px] text-white/60 text-right">via {exit.source}</p>
-            </div>
+      {/* Where am I */}
+      <div className="bg-panel rounded-xl p-3 flex items-center gap-3">
+        <span className="text-3xl">{PLACES[here].emoji}</span>
+        <div className="flex-1">
+          <p className="text-[10px] text-gray-400 uppercase">You are at</p>
+          <p className="text-lg font-bold text-white">{PLACES[here].nice}</p>
+          {demoSeat && <p className="text-[10px] text-warn">(pretend mode)</p>}
+        </div>
+        <div className="text-right">
+          {pos ? (
+            <p className="text-[10px] text-accent">📍 GPS on</p>
           ) : (
-            <div className="bg-panel rounded-xl p-4 text-center">
-              <p className="text-2xl mb-1">{decision?.severity === "warn" ? "⚠️" : "✅"}</p>
-              <p className="text-sm font-semibold">
-                {decision?.severity === "warn" ? "Heightened watch" : "All clear in your zone"}
-              </p>
-              <p className="text-[11px] text-gray-400 mt-1">
-                {decision?.summary || "Listening for safety updates…"}
-              </p>
+            <p className="text-[10px] text-warn">{geoErr || "📍 finding…"}</p>
+          )}
+        </div>
+      </div>
+
+      {/* Big map */}
+      <MiniMap pos={pos} here={here} moveNow={moveNow} target={target} />
+
+      {/* Status card */}
+      {moveNow && target ? (
+        <div className="bg-black border-4 border-white rounded-xl p-4 space-y-3">
+          <div className="text-center">
+            <p className="text-5xl mb-1">🚨</p>
+            <p className="text-xs uppercase tracking-widest text-white/80">Move now</p>
+            <p className="text-2xl font-black mt-1">Walk to {target.gate}</p>
+          </div>
+          {distance != null && (
+            <div className="bg-white/10 rounded-lg py-3 text-center">
+              <p className="text-xs uppercase text-white/70">How far</p>
+              <p className="text-4xl font-bold">{Math.round(distance)} m</p>
+              <p className="text-[10px] text-white/60">about {Math.round(distance / 75)} min walk</p>
             </div>
           )}
-
-          {/* Demo controls — jump between zones to fake movement */}
-          <div className="bg-panel/60 border border-gray-700 rounded-xl p-3">
-            <p className="text-[10px] uppercase text-gray-400 mb-2">Demo · jump position</p>
-            <div className="grid grid-cols-4 gap-2">
-              {(Object.keys(ZONES) as ZoneId[]).map((z) => (
-                <button
-                  key={z}
-                  onClick={() => setDemoOverride({ zone: z, lat: ZONES[z].lat, lng: ZONES[z].lng })}
-                  className={`text-xs py-2 rounded ${
-                    demoOverride?.zone === z
-                      ? "bg-accent text-ink font-bold"
-                      : "bg-gray-700 text-gray-200"
-                  }`}
-                >
-                  {z}
-                </button>
-              ))}
-            </div>
-            {demoOverride && (
-              <button
-                onClick={() => setDemoOverride(null)}
-                className="mt-2 w-full text-[10px] text-gray-400 underline"
-              >
-                Resume real GPS
-              </button>
-            )}
-          </div>
-        </section>
+          <p className="text-sm leading-snug text-center">{target.why}</p>
+          {pos && (
+            <a
+              href={`https://www.google.com/maps/dir/?api=1&origin=${pos.lat},${pos.lng}&destination=${target.lat},${target.lng}&travelmode=walking`}
+              target="_blank"
+              rel="noreferrer"
+              className="block text-center bg-white text-crit font-bold py-3 rounded-lg text-base"
+            >
+              🗺️ Open in Google Maps
+            </a>
+          )}
+          <button
+            onClick={stopSiren}
+            className="block w-full text-center text-[11px] text-white/70 underline"
+          >
+            Quiet the sound (keep map)
+          </button>
+        </div>
+      ) : (
+        <div className="bg-green-600/20 border border-green-500 rounded-xl p-5 text-center">
+          <p className="text-5xl mb-2">✅</p>
+          <p className="text-xl font-bold text-green-300">You are safe</p>
+          <p className="text-sm text-gray-300 mt-1">Enjoy the match!</p>
+        </div>
       )}
 
+      {/* Demo controls */}
+      <div className="bg-panel/60 border border-gray-700 rounded-xl p-3">
+        <p className="text-[10px] uppercase text-gray-400 mb-2">For demo: pretend I moved to</p>
+        <div className="grid grid-cols-4 gap-2">
+          {(Object.keys(PLACES) as ZoneId[]).map((z) => (
+            <button
+              key={z}
+              onClick={() => setDemoSeat(z)}
+              className={`text-xs py-2 rounded font-bold ${
+                demoSeat === z
+                  ? "text-white"
+                  : "bg-gray-700 text-gray-200"
+              }`}
+              style={demoSeat === z ? { background: PLACES[z].color } : undefined}
+            >
+              {PLACES[z].emoji}<br />{PLACES[z].nice.split(" ")[0]}
+            </button>
+          ))}
+        </div>
+        {demoSeat && (
+          <button
+            onClick={() => setDemoSeat(null)}
+            className="mt-2 w-full text-[10px] text-gray-400 underline"
+          >
+            Use my real location
+          </button>
+        )}
+      </div>
+
       <footer className="text-center text-[10px] text-gray-600">
-        Narendra Modi Stadium · Gemini 2.5 Flash · Firestore live
+        Powered by Google Cloud · Live safety alerts
       </footer>
     </main>
   );
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// MiniMap: embedded Google Map showing the fan dot + (when alerting) walking
-// directions polyline to the assigned exit gate.
-// ───────────────────────────────────────────────────────────────────────────
 function MiniMap({
   pos,
-  myZone,
-  alerting,
-  exit,
+  here,
+  moveNow,
+  target,
 }: {
   pos: Geo;
-  myZone: ZoneId;
-  alerting: boolean;
-  exit: { lat: number; lng: number; gate: string } | null;
+  here: ZoneId;
+  moveNow: boolean;
+  target: { lat: number; lng: number; gate: string } | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
-  const fanMarkerRef = useRef<google.maps.Marker | null>(null);
-  const gateMarkersRef = useRef<google.maps.Marker[]>([]);
-  const dirRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
+  const meRef = useRef<google.maps.Marker | null>(null);
+  const gatesRef = useRef<google.maps.Marker[]>([]);
   const dirSvcRef = useRef<google.maps.DirectionsService | null>(null);
-  const lastRouteKey = useRef<string>("");
+  const dirRendRef = useRef<google.maps.DirectionsRenderer | null>(null);
+  const lastKey = useRef<string>("");
 
-  // Init map once
   useEffect(() => {
     const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!key || !ref.current) return;
-    const loader = new Loader({ apiKey: key, version: "weekly", libraries: ["routes"] });
-    loader.load().then(() => {
+    new Loader({ apiKey: key, version: "weekly" }).load().then(() => {
       mapRef.current = new google.maps.Map(ref.current!, {
         center: STADIUM_CENTER,
         zoom: 17,
@@ -468,97 +413,87 @@ function MiniMap({
         disableDefaultUI: true,
         gestureHandling: "greedy",
       });
-      // Drop gate markers once
-      (Object.keys(ZONES) as ZoneId[]).forEach((z) => {
+      (Object.keys(PLACES) as ZoneId[]).forEach((z) => {
         const m = new google.maps.Marker({
-          position: { lat: ZONES[z].lat, lng: ZONES[z].lng },
+          position: { lat: PLACES[z].lat, lng: PLACES[z].lng },
           map: mapRef.current!,
-          label: { text: ZONES[z].gate, color: "#fff", fontSize: "10px", fontWeight: "bold" },
+          label: { text: PLACES[z].gate, color: "#fff", fontSize: "10px", fontWeight: "bold" },
           icon: {
             path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
-            scale: 5,
-            fillColor: "#22d3ee",
-            fillOpacity: 0.9,
+            scale: 6,
+            fillColor: PLACES[z].color,
+            fillOpacity: 0.95,
             strokeColor: "#fff",
-            strokeWeight: 1,
+            strokeWeight: 1.5,
           },
         });
-        gateMarkersRef.current.push(m);
+        gatesRef.current.push(m);
       });
       dirSvcRef.current = new google.maps.DirectionsService();
-      dirRendererRef.current = new google.maps.DirectionsRenderer({
+      dirRendRef.current = new google.maps.DirectionsRenderer({
         map: mapRef.current!,
         suppressMarkers: true,
-        polylineOptions: { strokeColor: "#22d3ee", strokeWeight: 6, strokeOpacity: 0.95 },
+        polylineOptions: { strokeColor: "#22c55e", strokeWeight: 7, strokeOpacity: 0.95 },
       });
     });
   }, []);
 
-  // Update fan dot position
   useEffect(() => {
     if (!mapRef.current || !pos) return;
     const p = { lat: pos.lat, lng: pos.lng };
-    if (!fanMarkerRef.current) {
-      fanMarkerRef.current = new google.maps.Marker({
+    const icon = {
+      path: google.maps.SymbolPath.CIRCLE,
+      scale: 11,
+      fillColor: moveNow ? "#ef4444" : "#22d3ee",
+      fillOpacity: 0.95,
+      strokeColor: "#fff",
+      strokeWeight: 3,
+    };
+    if (meRef.current) {
+      meRef.current.setPosition(p);
+      meRef.current.setIcon(icon);
+    } else {
+      meRef.current = new google.maps.Marker({
         position: p,
         map: mapRef.current,
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 10,
-          fillColor: alerting ? "#ef4444" : "#22d3ee",
-          fillOpacity: 0.95,
-          strokeColor: "#fff",
-          strokeWeight: 3,
-        },
-        label: { text: "You", color: "#fff", fontSize: "10px", fontWeight: "bold" },
-      });
-    } else {
-      fanMarkerRef.current.setPosition(p);
-      fanMarkerRef.current.setIcon({
-        path: google.maps.SymbolPath.CIRCLE,
-        scale: 10,
-        fillColor: alerting ? "#ef4444" : "#22d3ee",
-        fillOpacity: 0.95,
-        strokeColor: "#fff",
-        strokeWeight: 3,
+        icon,
+        label: { text: "Me", color: "#fff", fontSize: "11px", fontWeight: "bold" },
       });
     }
-  }, [pos?.lat, pos?.lng, alerting]);
+  }, [pos?.lat, pos?.lng, moveNow]);
 
-  // Draw walking route only when alerting + we have both endpoints
   useEffect(() => {
-    if (!mapRef.current || !dirSvcRef.current || !dirRendererRef.current) return;
-    if (!alerting || !pos || !exit) {
-      dirRendererRef.current.set("directions", null);
-      lastRouteKey.current = "";
+    if (!mapRef.current || !dirSvcRef.current || !dirRendRef.current) return;
+    if (!moveNow || !pos || !target) {
+      dirRendRef.current.set("directions", null);
+      lastKey.current = "";
       return;
     }
-    const key = `${pos.lat.toFixed(4)},${pos.lng.toFixed(4)}|${exit.lat},${exit.lng}`;
-    if (key === lastRouteKey.current) return;
-    lastRouteKey.current = key;
+    const k = `${pos.lat.toFixed(4)},${pos.lng.toFixed(4)}|${target.lat},${target.lng}`;
+    if (k === lastKey.current) return;
+    lastKey.current = k;
     dirSvcRef.current.route(
       {
         origin: { lat: pos.lat, lng: pos.lng },
-        destination: { lat: exit.lat, lng: exit.lng },
+        destination: { lat: target.lat, lng: target.lng },
         travelMode: google.maps.TravelMode.WALKING,
       },
       (res, status) => {
-        if (status === "OK" && res) dirRendererRef.current!.setDirections(res);
+        if (status === "OK" && res) dirRendRef.current!.setDirections(res);
       },
     );
-    // Fit bounds to both
-    const bounds = new google.maps.LatLngBounds();
-    bounds.extend({ lat: pos.lat, lng: pos.lng });
-    bounds.extend({ lat: exit.lat, lng: exit.lng });
-    mapRef.current.fitBounds(bounds, { top: 60, right: 40, bottom: 60, left: 40 });
-  }, [alerting, pos?.lat, pos?.lng, exit?.lat, exit?.lng]);
+    const b = new google.maps.LatLngBounds();
+    b.extend({ lat: pos.lat, lng: pos.lng });
+    b.extend({ lat: target.lat, lng: target.lng });
+    mapRef.current.fitBounds(b, { top: 60, right: 40, bottom: 60, left: 40 });
+  }, [moveNow, pos?.lat, pos?.lng, target?.lat, target?.lng]);
 
   if (!process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY) {
     return (
-      <div className="h-[260px] flex items-center justify-center text-gray-500 text-xs border border-dashed border-gray-700 rounded">
-        Set NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
+      <div className="h-[260px] flex items-center justify-center text-gray-500 text-xs">
+        Map key missing
       </div>
     );
   }
-  return <div ref={ref} className="h-[260px] w-full rounded-xl overflow-hidden" />;
+  return <div ref={ref} className="h-[280px] w-full rounded-xl overflow-hidden" />;
 }
